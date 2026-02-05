@@ -11,7 +11,6 @@
         import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc, query, getDocs, writeBatch } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
         import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
 
-        // Firebase Config - エラー防止のため空のオブジェクトで初期化
         let db, auth;
         const appId = 'card-budget-app';
 
@@ -29,9 +28,21 @@
             isLoaded: false
         };
 
+        // ローカル（ブラウザ）に一時保存する機能
+        const saveLocal = (items) => {
+            localStorage.setItem('kakeibo_data', JSON.stringify(items));
+        };
+        const loadLocal = () => {
+            const data = localStorage.getItem('kakeibo_data');
+            return data ? JSON.parse(data) : [];
+        };
+
         async function init() {
             try {
-                if (typeof __firebase_config !== 'undefined') {
+                // まずはローカルデータを読み込む
+                state.items = loadLocal();
+
+                if (typeof __firebase_config !== 'undefined' && __firebase_config !== "") {
                     const firebaseConfig = JSON.parse(__firebase_config);
                     const app = initializeApp(firebaseConfig);
                     db = getFirestore(app);
@@ -46,39 +57,47 @@
                             .sort((a, b) => b.timestamp - a.timestamp);
                         state.isLoaded = true;
                         render();
-                    }, (err) => {
-                        console.error("Firestore error:", err);
-                        state.isLoaded = true;
-                        render();
                     });
                 } else {
+                    // クラウド設定がない場合はローカルモードで即表示
                     state.isLoaded = true;
                     render();
                 }
             } catch (e) {
-                console.error("Initialization error:", e);
+                console.log("Cloud sync disabled: using local storage.");
                 state.isLoaded = true;
                 render();
             }
         }
 
         window.addExpense = async () => {
-            const amount = document.getElementById('amount').value;
-            const note = document.getElementById('note').value;
+            const amountInput = document.getElementById('amount');
+            const noteInput = document.getElementById('note');
+            const amount = amountInput.value;
+            const note = noteInput.value;
+            
             if (!amount) return;
 
+            const newItem = {
+                id: Date.now().toString(),
+                cardId: state.selectedCardId,
+                amount: Number(amount),
+                note: note,
+                timestamp: Date.now(),
+                date: new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })
+            };
+
             if (state.user) {
-                await addDoc(collection(db, 'artifacts', appId, 'users', state.user.uid, 'expenses'), {
-                    cardId: state.selectedCardId,
-                    amount: Number(amount),
-                    note: note,
-                    timestamp: Date.now(),
-                    date: new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })
-                });
+                // クラウド保存
+                await addDoc(collection(db, 'artifacts', appId, 'users', state.user.uid, 'expenses'), newItem);
+            } else {
+                // ローカル保存
+                state.items.unshift(newItem);
+                saveLocal(state.items);
             }
             
-            document.getElementById('amount').value = '';
-            document.getElementById('note').value = '';
+            amountInput.value = '';
+            noteInput.value = '';
             state.activeTab = 'status';
             render();
         };
@@ -86,7 +105,11 @@
         window.deleteItem = async (id) => {
             if (state.user) {
                 await deleteDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'expenses', id));
+            } else {
+                state.items = state.items.filter(i => i.id !== id);
+                saveLocal(state.items);
             }
+            render();
         };
 
         window.resetMonthly = async () => {
@@ -96,7 +119,11 @@
                 const batch = writeBatch(db);
                 snapshot.docs.forEach(d => batch.delete(d.ref));
                 await batch.commit();
+            } else {
+                state.items = [];
+                saveLocal(state.items);
             }
+            render();
         };
 
         window.switchTab = (tab) => {
@@ -112,7 +139,7 @@
         function render() {
             const root = document.getElementById('app');
             if (!state.isLoaded) {
-                root.innerHTML = '<div class="flex items-center justify-center min-h-screen text-slate-400">読み込み中...</div>';
+                root.innerHTML = '<div class="flex items-center justify-center min-h-screen text-slate-400 font-bold animate-pulse">読み込み中...</div>';
                 return;
             }
 
@@ -125,14 +152,21 @@
             root.innerHTML = `
                 <div class="max-w-md mx-auto bg-white min-h-[600px] flex flex-col shadow-2xl rounded-3xl overflow-hidden mt-4">
                     <div class="bg-slate-900 p-6 text-white shrink-0">
-                        <p class="text-[10px] opacity-60 font-bold tracking-widest uppercase">Total Remaining</p>
-                        <h1 class="text-3xl font-black text-blue-400">¥${totalRemaining.toLocaleString()}</h1>
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <p class="text-[10px] opacity-60 font-bold tracking-widest uppercase">Total Remaining</p>
+                                <h1 class="text-3xl font-black text-blue-400">¥${totalRemaining.toLocaleString()}</h1>
+                            </div>
+                            <div class="text-[10px] ${state.user ? 'text-green-400' : 'text-orange-400'} font-bold">
+                                ${state.user ? '● クラウド同期' : '○ ローカル保存中'}
+                            </div>
+                        </div>
                     </div>
 
                     <div class="flex border-b bg-white shrink-0">
-                        <button onclick="switchTab('status')" class="flex-1 py-4 text-xs font-bold ${state.activeTab === 'status' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-slate-400'}">状況</button>
-                        <button onclick="switchTab('input')" class="flex-1 py-4 text-xs font-bold ${state.activeTab === 'input' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-slate-400'}">入力</button>
-                        <button onclick="switchTab('history')" class="flex-1 py-4 text-xs font-bold ${state.activeTab === 'history' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-slate-400'}">履歴</button>
+                        <button onclick="switchTab('status')" class="flex-1 py-4 text-xs font-bold ${state.activeTab === 'status' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/30' : 'text-slate-400'}">状況</button>
+                        <button onclick="switchTab('input')" class="flex-1 py-4 text-xs font-bold ${state.activeTab === 'input' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/30' : 'text-slate-400'}">入力</button>
+                        <button onclick="switchTab('history')" class="flex-1 py-4 text-xs font-bold ${state.activeTab === 'history' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/30' : 'text-slate-400'}">履歴</button>
                     </div>
 
                     <div class="flex-1 overflow-y-auto p-4 bg-slate-50">
@@ -152,8 +186,12 @@
                         <span class="font-bold text-slate-700">${c.name}</span>
                         <span class="text-lg font-black ${c.remaining < 0 ? 'text-red-500' : 'text-slate-800'}">¥${c.remaining.toLocaleString()}</span>
                     </div>
-                    <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
-                        <div class="h-full" style="width: ${c.percent}%; background-color: ${c.color}"></div>
+                    <div class="h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                        <div class="h-full transition-all duration-500" style="width: ${c.percent}%; background-color: ${c.color}"></div>
+                    </div>
+                    <div class="flex justify-between mt-1">
+                        <span class="text-[9px] text-slate-400">予算: ¥${c.budget.toLocaleString()}</span>
+                        <span class="text-[9px] text-slate-400">${c.percent}%</span>
                     </div>
                 </div>
             `).join('');
@@ -164,16 +202,19 @@
                 <div class="space-y-4">
                     <div class="grid grid-cols-3 gap-2">
                         ${INITIAL_CARDS.map(c => `
-                            <button onclick="selectCard('${c.id}')" class="p-3 rounded-xl border-2 text-xs font-bold ${state.selectedCardId === c.id ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-white bg-white text-slate-400'}">
+                            <button onclick="selectCard('${c.id}')" class="p-3 rounded-xl border-2 text-xs font-bold transition-all ${state.selectedCardId === c.id ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-white bg-white text-slate-400'}">
                                 ${c.name}
                             </button>
                         `).join('')}
                     </div>
-                    <div class="bg-white p-6 rounded-2xl shadow-inner border">
-                        <input id="amount" type="number" placeholder="金額を入力" class="w-full text-3xl font-black text-right border-b-2 mb-4 outline-none">
+                    <div class="bg-white p-6 rounded-2xl shadow-inner border border-slate-100">
+                        <div class="flex items-center border-b-2 mb-4">
+                            <span class="text-2xl font-bold text-slate-300">¥</span>
+                            <input id="amount" type="number" placeholder="金額" class="w-full text-3xl font-black text-right outline-none p-2 bg-transparent">
+                        </div>
                         <input id="note" type="text" placeholder="メモ（任意）" class="w-full p-3 bg-slate-50 rounded-xl outline-none text-sm">
                     </div>
-                    <button onclick="addExpense()" class="w-full py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg">保存する</button>
+                    <button onclick="addExpense()" class="w-full py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg active:scale-95 transition-transform">保存する</button>
                 </div>
             `;
         }
@@ -181,22 +222,22 @@
         function renderHistory(cardData) {
             return `
                 <div class="space-y-2">
-                    ${state.items.length === 0 ? '<p class="text-center py-10 text-slate-300 text-sm">履歴はありません</p>' : state.items.map(i => {
+                    ${state.items.length === 0 ? '<p class="text-center py-20 text-slate-300 text-sm italic">履歴がありません</p>' : state.items.map(i => {
                         const c = cardData.find(x => x.id === i.cardId);
                         return `
                             <div class="bg-white p-3 rounded-xl flex justify-between items-center shadow-sm border border-slate-50">
                                 <div class="text-sm">
-                                    <p class="font-bold text-slate-700">${c?.name || '不明'}</p>
+                                    <p class="font-bold text-slate-700">${c?.name || 'その他'}</p>
                                     <p class="text-[10px] text-slate-400">${i.date} ${i.note ? '| '+i.note : ''}</p>
                                 </div>
                                 <div class="flex items-center gap-3">
-                                    <span class="font-bold">¥${i.amount.toLocaleString()}</span>
-                                    <button onclick="deleteItem('${i.id}')" class="text-slate-300 hover:text-red-500"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                                    <span class="font-bold text-slate-800">¥${i.amount.toLocaleString()}</span>
+                                    <button onclick="deleteItem('${i.id}')" class="text-slate-200 hover:text-red-500 transition-colors"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
                                 </div>
                             </div>
                         `;
                     }).join('')}
-                    <button onclick="resetMonthly()" class="w-full mt-6 py-3 text-red-500 font-bold text-xs bg-red-50 rounded-xl">今月のデータをリセット</button>
+                    ${state.items.length > 0 ? `<button onclick="resetMonthly()" class="w-full mt-6 py-3 text-red-500 font-bold text-xs bg-red-50 rounded-xl hover:bg-red-100 transition-colors">今月のデータをリセット</button>` : ''}
                 </div>
             `;
         }
