@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>カード別予算管理</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
+        import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc, query, getDocs, writeBatch } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+
+        let db, auth;
+        const appId = 'card-budget-app';
+
+        const INITIAL_CARDS = [
+            { id: 'aeon', name: 'イオン', budget: 16000, color: '#ec4899' },
+            { id: 'amazon', name: 'Amazon', budget: 15000, color: '#f97316' },
+            { id: 'rakuten', name: '楽天', budget: 46000, color: '#e11d48' },
+            { id: 'mercari', name: 'メルカリ', budget: 0, color: '#3b82f6' },
+        ];
+
+        let state = {
+            items: [],
+            activeTab: 'status',
+            selectedCardId: 'aeon',
+            user: null,
+            isLoaded: false
+        };
+
+        const saveLocal = (items) => {
+            localStorage.setItem('kakeibo_data', JSON.stringify(items));
+        };
+        const loadLocal = () => {
+            const data = localStorage.getItem('kakeibo_data');
+            return data ? JSON.parse(data) : [];
+        };
+
+        async function init() {
+            try {
+                state.items = loadLocal();
+                if (typeof __firebase_config !== 'undefined' && __firebase_config !== "") {
+                    const firebaseConfig = JSON.parse(__firebase_config);
+                    const app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+                    const userCredential = await signInAnonymously(auth);
+                    state.user = userCredential.user;
+                    const q = query(collection(db, 'artifacts', appId, 'users', state.user.uid, 'expenses'));
+                    onSnapshot(q, (snapshot) => {
+                        state.items = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+                            .sort((a, b) => b.timestamp - a.timestamp);
+                        state.isLoaded = true;
+                        render();
+                    }, (err) => {
+                        state.isLoaded = true;
+                        render();
+                    });
+                } else {
+                    state.isLoaded = true;
+                    render();
+                }
+            } catch (e) {
+                state.isLoaded = true;
+                render();
+            }
+        }
+
+        window.addExpense = async () => {
+            const amountInput = document.getElementById('amount');
+            const noteInput = document.getElementById('note');
+            const amount = amountInput.value;
+            const note = noteInput.value;
+            if (!amount) return;
+
+            const newItem = {
+                id: Date.now().toString(),
+                cardId: state.selectedCardId,
+                amount: Number(amount),
+                note: note,
+                timestamp: Date.now(),
+                date: new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })
+            };
+
+            if (state.user) {
+                await addDoc(collection(db, 'artifacts', appId, 'users', state.user.uid, 'expenses'), newItem);
+            } else {
+                state.items.unshift(newItem);
+                saveLocal(state.items);
+            }
+            
+            amountInput.value = '';
+            noteInput.value = '';
+            state.activeTab = 'status';
+            render();
+        };
+
+        window.deleteItem = async (id) => {
+            if (state.user) {
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'expenses', id));
+            } else {
+                state.items = state.items.filter(i => i.id !== id);
+                saveLocal(state.items);
+            }
+            render();
+        };
+
+        window.resetMonthly = async () => {
+            if (!confirm('今月のデータをすべてリセットしますか？')) return;
+            if (state.user) {
+                const snapshot = await getDocs(collection(db, 'artifacts', appId, 'users', state.user.uid, 'expenses'));
+                const batch = writeBatch(db);
+                snapshot.docs.forEach(d => batch.delete(d.ref));
+                await batch.commit();
+            } else {
+                state.items = [];
+                saveLocal(state.items);
+            }
+            render();
+        };
+
+        window.switchTab = (tab) => {
+            state.activeTab = tab;
+            render();
+        };
+
+        window.selectCard = (id) => {
+            state.selectedCardId = id;
+            render();
+        };
+
+        function render() {
+            const root = document.getElementById('app');
+            if (!state.isLoaded) {
+                root.innerHTML = '<div class="flex items-center justify-center min-h-screen text-slate-400 font-bold">読み込み中...</div>';
+                return;
+            }
+
+            const cardData = INITIAL_CARDS.map(card => {
+                const spent = state.items.filter(i => i.cardId === card.id).reduce((s, i) => s + i.amount, 0);
+                return { 
+                    ...card, 
+                    spent, 
+                    remaining: card.budget - spent, 
+                    percent: card.budget > 0 ? Math.min(Math.round((spent/card.budget)*100), 100) : 0 
+                };
+            });
+            const totalBudget = cardData.reduce((s, c) => s + c.budget, 0);
+            const totalRemaining = cardData.reduce((s, c) => s + c.remaining, 0);
+
+            root.innerHTML = `
+                <div class="max-w-md mx-auto bg-white min-h-[600px] flex flex-col shadow-2xl rounded-3xl overflow-hidden mt-4">
+                    <div class="bg-slate-900 p-6 text-white shrink-0">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <p class="text-[10px] opacity-60 font-bold tracking-widest uppercase">残高状況</p>
+                                <div class="flex flex-col gap-1 mt-1">
+                                    <span class="text-xs opacity-70">予算 ¥${totalBudget.toLocaleString()} →</span>
+                                    <h1 class="text-3xl font-black text-blue-400">今 ¥${totalRemaining.toLocaleString()}</h1>
+                                </div>
+                            </div>
+                            <div class="text-[10px] ${state.user ? 'text-green-400' : 'text-orange-400'} font-bold mt-1">
+                                ${state.user ? '● 同期中' : '○ 保存中'}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex border-b bg-white shrink-0">
+                        <button onclick="switchTab('status')" class="flex-1 py-4 text-xs font-bold ${state.activeTab === 'status' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/30' : 'text-slate-400'}">状況</button>
+                        <button onclick="switchTab('input')" class="flex-1 py-4 text-xs font-bold ${state.activeTab === 'input' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/30' : 'text-slate-400'}">入力</button>
+                        <button onclick="switchTab('history')" class="flex-1 py-4 text-xs font-bold ${state.activeTab === 'history' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50/30' : 'text-slate-400'}">履歴</button>
+                    </div>
+
+                    <div class="flex-1 overflow-y-auto p-4 bg-slate-50">
+                        ${state.activeTab === 'status' ? renderStatus(cardData) : ''}
+                        ${state.activeTab === 'input' ? renderInput() : ''}
+                        ${state.activeTab === 'history' ? renderHistory(cardData) : ''}
+                    </div>
+                </div>
+            `;
+            lucide.createIcons();
+        }
+
+        function renderStatus(data) {
+            return data.map(c => `
+                <div class="bg-white p-5 rounded-2xl mb-4 shadow-sm border border-slate-100">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="text-lg font-bold text-slate-700">${c.name}</span>
+                        <span class="text-2xl font-black ${c.remaining < 0 ? 'text-red-500' : 'text-slate-800'}">
+                            ${c.remaining < 0 ? '-' : ''}¥${Math.abs(c.remaining).toLocaleString()}
+                        </span>
+                    </div>
+                    ${c.budget > 0 ? `
+                        <div class="h-3 bg-slate-100 rounded-full overflow-hidden mb-2">
+                            <div class="h-full transition-all duration-500" style="width: ${c.percent}%; background-color: ${c.color}"></div>
+                        </div>
+                        <div class="flex justify-between items-end">
+                            <span class="text-lg font-medium text-slate-400">予算: ¥${c.budget.toLocaleString()}</span>
+                            <span class="text-sm font-bold text-slate-400">${c.percent}%</span>
+                        </div>
+                    ` : `
+                        <div class="text-sm text-slate-400 italic py-1">利用合計を記録中</div>
+                    `}
+                </div>
+            `).join('');
+        }
+
+        function renderInput() {
+            return `
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 gap-2">
+                        ${INITIAL_CARDS.map(c => `
+                            <button onclick="selectCard('${c.id}')" class="p-4 rounded-xl border-2 text-sm font-bold transition-all ${state.selectedCardId === c.id ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-white bg-white text-slate-400'}">
+                                ${c.name}
+                            </button>
+                        `).join('')}
+                    </div>
+                    <div class="bg-white p-6 rounded-2xl shadow-inner border border-slate-100">
+                        <div class="flex items-center border-b-2 mb-4">
+                            <span class="text-2xl font-bold text-slate-300">¥</span>
+                            <input id="amount" type="number" placeholder="金額" class="w-full text-4xl font-black text-right outline-none p-2 bg-transparent">
+                        </div>
+                        <input id="note" type="text" placeholder="メモ（任意）" class="w-full p-4 bg-slate-50 rounded-xl outline-none text-sm">
+                    </div>
+                    <button onclick="addExpense()" class="w-full py-5 bg-blue-600 text-white rounded-2xl font-black shadow-lg active:scale-95 transition-transform">保存する</button>
+                </div>
+            `;
+        }
+
+        function renderHistory(cardData) {
+            return `
+                <div class="space-y-2">
+                    ${state.items.length === 0 ? '<p class="text-center py-20 text-slate-300 text-sm italic">履歴がありません</p>' : state.items.map(i => {
+                        const c = cardData.find(x => x.id === i.cardId);
+                        return `
+                            <div class="bg-white p-4 rounded-xl flex justify-between items-center shadow-sm border border-slate-50">
+                                <div class="text-sm">
+                                    <p class="font-bold text-slate-700">${c?.name || 'その他'}</p>
+                                    <p class="text-xs text-slate-400">${i.date} ${i.note ? '| '+i.note : ''}</p>
+                                </div>
+                                <div class="flex items-center gap-4">
+                                    <span class="font-bold text-slate-800 text-base">¥${i.amount.toLocaleString()}</span>
+                                    <button onclick="deleteItem('${i.id}')" class="text-slate-200 hover:text-red-500 transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                    ${state.items.length > 0 ? `<button onclick="resetMonthly()" class="w-full mt-6 py-4 text-red-500 font-bold text-sm bg-red-50 rounded-xl hover:bg-red-100 transition-colors">今月のデータをリセット</button>` : ''}
+                </div>
+            `;
+        }
+
+        window.onload = init;
+    </script>
+</head>
+<body class="bg-slate-100">
+    <div id="app"></div>
+</body>
+</html>
